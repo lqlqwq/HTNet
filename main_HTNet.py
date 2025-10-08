@@ -21,7 +21,7 @@ def reset_weights(m):  # Reset the weights for network to avoid weight leakage
             #             print(f'Reset trainable parameters of layer = {layer}')
             layer.reset_parameters()
 
-def confusionMatrix(gt, pred, show=False):
+def confusionMatrix(gt, pred, show=False):  #计算混淆矩阵
     TN, FP, FN, TP = confusion_matrix(gt, pred).ravel()
     f1_score = (2 * TP) / (2 * TP + FP + FN)
     num_samples = len([x for x in gt if x == 1])
@@ -29,7 +29,7 @@ def confusionMatrix(gt, pred, show=False):
     return f1_score, average_recall
 
 
-def recognition_evaluation(final_gt, final_pred, show=False):
+def recognition_evaluation(final_gt, final_pred, show=False):    #计算UF1/UAR
     label_dict = {'negative': 0, 'positive': 1, 'surprise': 2}
     # Display recognition result
     f1_list = []
@@ -53,7 +53,7 @@ def recognition_evaluation(final_gt, final_pred, show=False):
 # 1. get the whole face block coordinates
 def whole_face_block_coordinates():
     df = pandas.read_csv('combined_3_class2_for_optical_flow.csv')
-    m, n = df.shape
+    m, n = df.shape #行数， 列数
     base_data_src = './datasets/combined_datasets_whole'
     total_emotion = 0
     image_size_u_v = 28
