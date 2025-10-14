@@ -17,3 +17,4 @@ STSNet_for_part_C.py
 ourmodel_threedatasets_weights
 datasets/MMEW_Micro_Exp_delete_others.csv
 datasets/MMEW_Micro_Exp_delete_others_anger.csv
+_pycache_/
