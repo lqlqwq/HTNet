@@ -3,6 +3,8 @@ import os
 import numpy as np
 import cv2
 import time
+import threading
+from datetime import datetime, timedelta
 
 import pandas
 from sklearn.metrics import confusion_matrix
@@ -14,6 +16,12 @@ import torch
 from Model import HTNet
 import numpy as np
 from facenet_pytorch import MTCNN
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.console import Console
+from rich.table import Table
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
 # Some of the codes are adapted from STSNet
 def reset_weights(m):  # Reset the weights for network to avoid weight leakage
     for layer in m.children():
@@ -69,7 +77,7 @@ def whole_face_block_coordinates():
         train_face_image_apex = cv2.imread(img_path_apex) # (444, 533, 3)
         face_apex = cv2.resize(train_face_image_apex, (28,28), interpolation=cv2.INTER_AREA)
         # get face and bounding box
-        mtcnn = MTCNN(margin=0, image_size=image_size_u_v, select_largest=True, post_process=False, device='cuda:1')
+        mtcnn = MTCNN(margin=0, image_size=image_size_u_v, select_largest=True, post_process=False, device='cuda:2')
         batch_boxes, _, batch_landmarks = mtcnn.detect(face_apex, landmarks=True)
         # print(img_path_apex,batch_landmarks)
         # if not detecting face
@@ -165,11 +173,10 @@ def main(config):
     all_accuracy_dict = {}
     is_cuda = torch.cuda.is_available()
     if is_cuda:
-        device = torch.device('cuda:1')
+        device = torch.device('cuda:2')
     else:
         # device = torch.device('cpu')
         raise RuntimeError("CUDA不可用，程序需要GPU才能运行")
-        
     loss_fn = nn.CrossEntropyLoss()
     if (config.train):
         if not path.exists('ourmodel_threedatasets_weights'):
@@ -188,12 +195,54 @@ def main(config):
     all_five_parts_optical_flow = crop_optical_flow_block()
     print(subName)
 
-    for n_subName in subName:
+    # 初始化Rich控制台和进度条
+    console = Console()
+    
+    # 创建进度条布局
+    def create_progress_layout():
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="progress", size=10),
+            Layout(name="stats", size=8)
+        )
+        return layout
+
+    # 创建统计信息表格
+    def create_stats_table(current_subject, total_subjects, current_epoch, total_epochs, 
+                          train_acc=None, val_acc=None, eta_subject=None, eta_total=None):
+        table = Table(title="训练统计信息", show_header=True, header_style="bold magenta")
+        table.add_column("指标", style="cyan", no_wrap=True)
+        table.add_column("当前值", style="green")
+        table.add_column("总计", style="yellow")
+        
+        table.add_row("受试者", f"{current_subject}", f"{total_subjects}")
+        table.add_row("Epoch", f"{current_epoch}", f"{total_epochs}")
+        if train_acc is not None:
+            table.add_row("训练准确率", f"{train_acc:.4f}", "")
+        if val_acc is not None:
+            table.add_row("验证准确率", f"{val_acc:.4f}", "")
+        if eta_subject:
+            table.add_row("当前受试者预计完成", eta_subject, "")
+        if eta_total:
+            table.add_row("总体预计完成", eta_total, "")
+        
+        return table
+
+    # 训练进度跟踪变量
+    total_subjects = len(subName)
+    subject_start_time = time.time()
+    
+    for subject_idx, n_subName in enumerate(subName):
         print('Subject:', n_subName)
         y_train = []
         y_test = []
         four_parts_train = []
         four_parts_test = []
+        
+        # 记录当前受试者开始时间
+        current_subject_start = time.time()
+        
         # Get train dataset
         expression = os.listdir(main_path + '/' + n_subName + '/u_train')
         for n_expression in expression:
@@ -252,55 +301,127 @@ def main(config):
         best_accuracy_for_each_subject = 0
         best_each_subject_pred = []
 
-        for epoch in range(1, epochs + 1):
-            if (config.train):
-                # Training
-                model.train()
-                train_loss = 0.0
-                num_train_correct = 0
-                num_train_examples = 0
+        # 创建进度条和实时显示
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            refresh_per_second=1
+        ) as progress:
+            
+            # 添加总体进度任务
+            total_task = progress.add_task(
+                f"[cyan]总体进度 ({subject_idx + 1}/{total_subjects})", 
+                total=total_subjects * epochs
+            )
+            
+            # 添加当前受试者进度任务
+            subject_task = progress.add_task(
+                f"[green]受试者 {n_subName}", 
+                total=epochs
+            )
+            
+            # 定时更新变量
+            last_update_time = time.time()
+            update_interval = 30  # 30秒更新一次
+            epoch_times = []  # 存储每个epoch的时间
+            
+            for epoch in range(1, epochs + 1):
+                epoch_start_time = time.time()
+                
+                if (config.train):
+                    # Training
+                    model.train()
+                    train_loss = 0.0
+                    num_train_correct = 0
+                    num_train_examples = 0
 
-                for batch in train_dl:
-                    optimizer.zero_grad()
+                    for batch_idx, batch in enumerate(train_dl):
+                        optimizer.zero_grad()
+                        x = batch[0].to(device)
+                        y = batch[1].to(device)
+                        yhat = model(x)
+                        loss = loss_fn(yhat, y)
+                        loss.backward()
+                        optimizer.step()
+
+                        train_loss += loss.data.item() * x.size(0)
+                        num_train_correct += (torch.max(yhat, 1)[1] == y).sum().item()
+                        num_train_examples += x.shape[0]
+
+                    train_acc = num_train_correct / num_train_examples
+                    train_loss = train_loss / len(train_dl.dataset)
+
+                # Testing
+                model.eval()
+                val_loss = 0.0
+                num_val_correct = 0
+                num_val_examples = 0
+                for batch in test_dl:
                     x = batch[0].to(device)
                     y = batch[1].to(device)
                     yhat = model(x)
                     loss = loss_fn(yhat, y)
-                    loss.backward()
-                    optimizer.step()
+                    val_loss += loss.data.item() * x.size(0)
+                    num_val_correct += (torch.max(yhat, 1)[1] == y).sum().item()
+                    num_val_examples += y.shape[0]
 
-                    train_loss += loss.data.item() * x.size(0)
-                    num_train_correct += (torch.max(yhat, 1)[1] == y).sum().item()
-                    num_train_examples += x.shape[0]
-
-                train_acc = num_train_correct / num_train_examples
-                train_loss = train_loss / len(train_dl.dataset)
-
-            # Testing
-            model.eval()
-            val_loss = 0.0
-            num_val_correct = 0
-            num_val_examples = 0
-            for batch in test_dl:
-                x = batch[0].to(device)
-                y = batch[1].to(device)
-                yhat = model(x)
-                loss = loss_fn(yhat, y)
-                val_loss += loss.data.item() * x.size(0)
-                num_val_correct += (torch.max(yhat, 1)[1] == y).sum().item()
-                num_val_examples += y.shape[0]
-
-            val_acc = num_val_correct / num_val_examples
-            val_loss = val_loss / len(test_dl.dataset)
-            #### best result
-            temp_best_each_subject_pred = []
-            if best_accuracy_for_each_subject <= val_acc:
-                best_accuracy_for_each_subject = val_acc
-                temp_best_each_subject_pred.extend(torch.max(yhat, 1)[1].tolist())
-                best_each_subject_pred = temp_best_each_subject_pred
-                # Save Weights
-                if (config.train):
-                    torch.save(model.state_dict(), weight_path)
+                val_acc = num_val_correct / num_val_examples
+                val_loss = val_loss / len(test_dl.dataset)
+                
+                # 记录当前epoch时间
+                epoch_end_time = time.time()
+                current_epoch_time = epoch_end_time - epoch_start_time
+                epoch_times.append(current_epoch_time)
+                
+                # 计算平均每epoch时间
+                avg_epoch_time = sum(epoch_times) / len(epoch_times)
+                
+                # 计算预计完成时间
+                current_time = time.time()
+                elapsed_time = current_time - current_subject_start
+                total_elapsed = current_time - t
+                
+                # 当前受试者预计完成时间
+                remaining_epochs = epochs - epoch
+                eta_subject_seconds = remaining_epochs * avg_epoch_time
+                eta_subject = (datetime.now() + timedelta(seconds=eta_subject_seconds)).strftime("%H:%M:%S")
+                
+                # 总体预计完成时间
+                total_completed_epochs = (subject_idx * epochs) + epoch
+                total_remaining_epochs = (total_subjects * epochs) - total_completed_epochs
+                eta_total_seconds = total_remaining_epochs * avg_epoch_time
+                eta_total = (datetime.now() + timedelta(seconds=eta_total_seconds)).strftime("%H:%M:%S")
+                
+                # 更新进度条
+                progress.update(subject_task, completed=epoch)
+                progress.update(total_task, completed=(subject_idx * epochs) + epoch)
+                
+                # 每30秒或每个epoch结束时更新描述信息
+                if current_time - last_update_time >= update_interval or epoch == epochs:
+                    progress.update(
+                        subject_task, 
+                        description=f"[green]受试者 {n_subName} | Epoch {epoch}/{epochs} | 训练准确率: {train_acc:.4f} | 验证准确率: {val_acc:.4f} | 平均每Epoch: {avg_epoch_time:.2f}s | ETA: {eta_subject}"
+                    )
+                    progress.update(
+                        total_task,
+                        description=f"[cyan]总体进度 ({subject_idx + 1}/{total_subjects}) | 平均每Epoch: {avg_epoch_time:.2f}s | 总ETA: {eta_total}"
+                    )
+                    last_update_time = current_time
+                
+                #### best result
+                temp_best_each_subject_pred = []
+                if best_accuracy_for_each_subject <= val_acc:
+                    best_accuracy_for_each_subject = val_acc
+                    temp_best_each_subject_pred.extend(torch.max(yhat, 1)[1].tolist())
+                    best_each_subject_pred = temp_best_each_subject_pred
+                    # Save Weights
+                    if (config.train):
+                        torch.save(model.state_dict(), weight_path)
 
         # For UF1 and UAR computation
         print('Best Predicted    :', best_each_subject_pred)
