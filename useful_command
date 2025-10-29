@@ -1,3 +1,5 @@
 python main_HTNet.py --train False
 
 python main_HTNet.py --train True
+
+50G+  预测完成需要200G？

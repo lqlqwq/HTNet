@@ -188,6 +188,20 @@ def main(config):
     all_five_parts_optical_flow = crop_optical_flow_block()
     print(subName)
 
+    model = HTNet(
+            image_size=28,
+            patch_size=7,
+            dim=256,  # 256,--96, 56-, 192
+            heads=3,  # 3 ---- , 6-
+            num_hierarchies=3,  # 3----number of hierarchies
+            block_repeats=(2, 2, 10),#(2, 2, 8),------
+            # the number of transformer blocks at each heirarchy, starting from the bottom(2,2,20) -
+            num_classes=3
+        )
+
+    model = model.to(device)
+    model.load_state_dict(torch.load('ourmodel_threedatasets_weights' + '/' + '026' + '.pth'))
+
     for n_subName in subName:
         print('Subject:', n_subName)
         y_train = []
@@ -218,27 +232,28 @@ def main(config):
                 r_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
                 lr_eye_lips = cv2.vconcat([l_eye_lips, r_eye_lips])
                 four_parts_test.append(lr_eye_lips)
-        weight_path = 'ourmodel_threedatasets_weights' + '/' + n_subName + '.pth'
+        # weight_path = 'ourmodel_threedatasets_weights' + '/' + n_subName + '.pth'
 
         # Reset or load model weigts
-        model = HTNet(
-            image_size=28,
-            patch_size=7,
-            dim=256,  # 256,--96, 56-, 192
-            heads=3,  # 3 ---- , 6-
-            num_hierarchies=3,  # 3----number of hierarchies
-            block_repeats=(2, 2, 10),#(2, 2, 8),------
-            # the number of transformer blocks at each heirarchy, starting from the bottom(2,2,20) -
-            num_classes=3
-        )
+        # model = HTNet(
+        #     image_size=28,
+        #     patch_size=7,
+        #     dim=256,  # 256,--96, 56-, 192
+        #     heads=3,  # 3 ---- , 6-
+        #     num_hierarchies=3,  # 3----number of hierarchies
+        #     block_repeats=(2, 2, 10),#(2, 2, 8),------
+        #     # the number of transformer blocks at each heirarchy, starting from the bottom(2,2,20) -
+        #     num_classes=3
+        # )
 
-        model = model.to(device)
+        # model = model.to(device)
 
         if(config.train):
             # model.apply(reset_weights)
             print('train')
         else:
-            model.load_state_dict(torch.load(weight_path))
+            print('test')
+            # model.load_state_dict(torch.load(weight_path))
         optimizer = torch.optim.Adam(model.parameters(),lr=learning_rate)
         y_train = torch.Tensor(y_train).to(dtype=torch.long)
         four_parts_train =  torch.Tensor(np.array(four_parts_train)).permute(0, 3, 1, 2)

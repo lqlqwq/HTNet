@@ -18,10 +18,9 @@ import numpy as np
 from facenet_pytorch import MTCNN
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.console import Console
-from rich.table import Table
-from rich.live import Live
-from rich.layout import Layout
-from rich.panel import Panel
+
+import copy
+
 # Some of the codes are adapted from STSNet
 def reset_weights(m):  # Reset the weights for network to avoid weight leakage
     for layer in m.children():
@@ -29,15 +28,16 @@ def reset_weights(m):  # Reset the weights for network to avoid weight leakage
             #             print(f'Reset trainable parameters of layer = {layer}')
             layer.reset_parameters()
 
-def confusionMatrix(gt, pred, show=False):  #计算混淆矩阵
+#计算混淆矩阵
+def confusionMatrix(gt, pred, show=False):  
     TN, FP, FN, TP = confusion_matrix(gt, pred).ravel()
     f1_score = (2 * TP) / (2 * TP + FP + FN)
     num_samples = len([x for x in gt if x == 1])
     average_recall = TP / num_samples
     return f1_score, average_recall
 
-
-def recognition_evaluation(final_gt, final_pred, show=False):    #计算UF1/UAR
+#计算UF1/UAR
+def recognition_evaluation(final_gt, final_pred, show=False):    
     label_dict = {'negative': 0, 'positive': 1, 'surprise': 2}
     # Display recognition result
     f1_list = []
@@ -58,7 +58,7 @@ def recognition_evaluation(final_gt, final_pred, show=False):    #计算UF1/UAR
     except:
         return '', ''
 
-# 1. get the whole face block coordinates
+# 获取人脸图片特征点
 def whole_face_block_coordinates():
     df = pandas.read_csv('combined_3_class2_for_optical_flow.csv')
     m, n = df.shape #行数， 列数
@@ -68,29 +68,34 @@ def whole_face_block_coordinates():
     # get the block center coordinates
     face_block_coordinates = {}
 
-    # for i in range(0, m):
+    # 遍历所有图
     for i in range(0, m):
         image_name = str(df['sub'][i]) + '_' + str(
             df['filename_o'][i]) + ' .png'
         # print(image_name)
         img_path_apex = base_data_src + '/' + df['imagename'][i]
         train_face_image_apex = cv2.imread(img_path_apex) # (444, 533, 3)
+        # 缩小图像至28-28
         face_apex = cv2.resize(train_face_image_apex, (28,28), interpolation=cv2.INTER_AREA)
-        # get face and bounding box
-        mtcnn = MTCNN(margin=0, image_size=image_size_u_v, select_largest=True, post_process=False, device='cuda:2')
+        # 初始化人脸检测器MTCNN
+        mtcnn = MTCNN(margin=0, image_size=image_size_u_v, select_largest=True, post_process=False, device='cuda')
         batch_boxes, _, batch_landmarks = mtcnn.detect(face_apex, landmarks=True)
-        # print(img_path_apex,batch_landmarks)
         # if not detecting face
         if batch_landmarks is None:
-            # print( df['imagename'][i])
-            batch_landmarks = np.array([[[9.528073, 11.062551]
-                                            , [21.396168, 10.919773]
-                                            , [15.380184, 17.380562]
-                                            , [10.255435, 22.121233]
-                                            , [20.583706, 22.25584]]])
-            # print(img_path_apex)
+            batch_landmarks = np.array(
+                [
+                    [
+                        [9.528073, 11.062551], 
+                        [21.396168, 10.919773], 
+                        [15.380184, 17.380562], 
+                        [10.255435, 22.121233], 
+                        [20.583706, 22.25584]
+                    ]
+                ]
+            )
+
+        # batch_landmarks 是一个1,1,5,2形状的数组， 1,1 代表第几张图的第几个人脸，5代表关键点个数，2代表坐标  选第0个元素对应的就是第一张图
         row_n, col_n = np.shape(batch_landmarks[0])
-        # print(batch_landmarks[0])
         for i in range(0, row_n):
             for j in range(0, col_n):
                 if batch_landmarks[0][i][j] < 7:
@@ -104,7 +109,7 @@ def whole_face_block_coordinates():
     # print(len(face_block_coordinates))
     return face_block_coordinates
 
-# 2. crop the 28*28-> 14*14 according to i5 image centers
+# 沿特征点对图像进行切割(存在部分重叠)
 def crop_optical_flow_block():
     face_block_coordinates_dict = whole_face_block_coordinates()
     # print(len(face_block_coordinates_dict))
@@ -121,8 +126,9 @@ def crop_optical_flow_block():
                 four_part_coordinates[0][1]-7: four_part_coordinates[0][1]+7]
         l_lips = flow_image[four_part_coordinates[1][0] - 7:four_part_coordinates[1][0] + 7,
                 four_part_coordinates[1][1] - 7: four_part_coordinates[1][1] + 7]
-        nose = flow_image[four_part_coordinates[2][0] - 7:four_part_coordinates[2][0] + 7,
-                four_part_coordinates[2][1] - 7: four_part_coordinates[2][1] + 7]
+        # nose = flow_image[four_part_coordinates[2][0] - 7:four_part_coordinates[2][0] + 7,
+        #         four_part_coordinates[2][1] - 7: four_part_coordinates[2][1] + 7]
+        nose = ''
         r_eye = flow_image[four_part_coordinates[3][0] - 7:four_part_coordinates[3][0] + 7,
                 four_part_coordinates[3][1] - 7: four_part_coordinates[3][1] + 7]
         r_lips = flow_image[four_part_coordinates[4][0] - 7:four_part_coordinates[4][0] + 7,
@@ -133,143 +139,93 @@ def crop_optical_flow_block():
         four_parts_optical_flow_imgs[n_img].append(r_eye)
         four_parts_optical_flow_imgs[n_img].append(r_lips)
         # print(np.shape(l_eye))
-    # print((four_parts_optical_flow_imgs['spNO.189_f_150.png'][0]))->(14,14,3)
-    print(len(four_parts_optical_flow_imgs))
+    # print(len(four_parts_optical_flow_imgs))
     return four_parts_optical_flow_imgs
-
-class Fusionmodel(nn.Module):
-  def __init__(self):
-    #  extend from original
-    super(Fusionmodel,self).__init__()
-    self.fc1 = nn.Linear(15, 3) # 15->3
-    self.bn1 = nn.BatchNorm1d(3)
-    self.d1 = nn.Dropout(p=0.5)
-    # Linear 256 to 26
-    self.fc_2 = nn.Linear(6, 2) # 6->3
-    # self.fc_cont = nn.Linear(256, 3)
-    self.relu = nn.ReLU()
-
-    # forward layers is to use these layers above
-  def forward(self, whole_feature, l_eye_feature, l_lips_feature, nose_feature, r_eye_feature, r_lips_feature):
-    fuse_five_features = torch.cat((l_eye_feature, l_lips_feature, nose_feature, r_eye_feature, r_lips_feature), 0)
-    # nn.linear - fc
-    fuse_out = self.fc1(fuse_five_features)
-    # fuse_out = self.bn1(fuse_out)
-    fuse_out = self.relu(fuse_out)
-    fuse_out = self.d1(fuse_out) # drop out
-    #
-    fuse_whole_five_parts = torch.cat(
-        (whole_feature,fuse_out), 0)
-    # fuse_whole_five_parts = self.bn1(fuse_whole_five_parts)
-    fuse_whole_five_parts = self.relu(fuse_whole_five_parts)
-    fuse_whole_five_parts = self.d1(fuse_whole_five_parts)  # drop out
-    out = self.fc_2(fuse_whole_five_parts)
-    return out
 
 def main(config):
     learning_rate = 0.00005
     batch_size = 256
     epochs = 800
+    # epochs = 1600
     all_accuracy_dict = {}
+
+    path_name = "new_test"
+
     is_cuda = torch.cuda.is_available()
     if is_cuda:
-        device = torch.device('cuda:2')
+        device = torch.device('cuda')
     else:
         # device = torch.device('cpu')
         raise RuntimeError("CUDA不可用，程序需要GPU才能运行")
+
+    # 交叉熵损失函数
     loss_fn = nn.CrossEntropyLoss()
     if (config.train):
-        if not path.exists('ourmodel_threedatasets_weights'):
-            os.mkdir('ourmodel_threedatasets_weights')
+        if not path.exists(path_name):
+            os.mkdir(path_name)
 
     print('lr=%f, epochs=%d, device=%s\n' % (learning_rate, epochs, device))
 
+    #统计数据初始化
     total_gt = []
     total_pred = []
     best_total_pred = []
-
     t = time.time()
 
     main_path = './datasets/three_norm_u_v_os'
     subName = os.listdir(main_path)
+    # subName = ["031"]
     all_five_parts_optical_flow = crop_optical_flow_block()
     print(subName)
 
     # 初始化Rich控制台和进度条
     console = Console()
-    
-    # 创建进度条布局
-    def create_progress_layout():
-        layout = Layout()
-        layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="progress", size=10),
-            Layout(name="stats", size=8)
-        )
-        return layout
-
-    # 创建统计信息表格
-    def create_stats_table(current_subject, total_subjects, current_epoch, total_epochs, 
-                          train_acc=None, val_acc=None, eta_subject=None, eta_total=None):
-        table = Table(title="训练统计信息", show_header=True, header_style="bold magenta")
-        table.add_column("指标", style="cyan", no_wrap=True)
-        table.add_column("当前值", style="green")
-        table.add_column("总计", style="yellow")
-        
-        table.add_row("受试者", f"{current_subject}", f"{total_subjects}")
-        table.add_row("Epoch", f"{current_epoch}", f"{total_epochs}")
-        if train_acc is not None:
-            table.add_row("训练准确率", f"{train_acc:.4f}", "")
-        if val_acc is not None:
-            table.add_row("验证准确率", f"{val_acc:.4f}", "")
-        if eta_subject:
-            table.add_row("当前受试者预计完成", eta_subject, "")
-        if eta_total:
-            table.add_row("总体预计完成", eta_total, "")
-        
-        return table
-
     # 训练进度跟踪变量
     total_subjects = len(subName)
-    subject_start_time = time.time()
     
+    #Sub内循环
     for subject_idx, n_subName in enumerate(subName):
-        print('Subject:', n_subName)
+        print('Subject:%s(%s)' % (n_subName, 'Train' if config.train else 'Test'))
+
+        # 数据初始化
         y_train = []
         y_test = []
         four_parts_train = []
-        four_parts_test = []
+        four_parts_test = []       
         
-        # 记录当前受试者开始时间
-        current_subject_start = time.time()
-        
-        # Get train dataset
+        # 数据处理(感觉可以优化？)
+        # 读取训练集
         expression = os.listdir(main_path + '/' + n_subName + '/u_train')
         for n_expression in expression:
             img = os.listdir(main_path + '/' + n_subName + '/u_train/' + n_expression)
 
             for n_img in img:
                 y_train.append(int(n_expression))
-                l_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][0], all_five_parts_optical_flow[n_img][1]])
-                r_eye_lips  =  cv2.hconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
-                lr_eye_lips = cv2.vconcat([l_eye_lips, r_eye_lips])
+                # l_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][0], all_five_parts_optical_flow[n_img][1]])
+                # r_eye_lips  =  cv2.hconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
+                # lr_eye_lips = cv2.vconcat([l_eye_lips, r_eye_lips])
+                l_eye_lips = cv2.vconcat([all_five_parts_optical_flow[n_img][0], all_five_parts_optical_flow[n_img][1]])
+                r_eye_lips  =  cv2.vconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
+                lr_eye_lips = cv2.hconcat([l_eye_lips, r_eye_lips])
                 four_parts_train.append(lr_eye_lips)
 
 
-        # Get test dataset
+        # 读取测试集
         expression = os.listdir(main_path + '/' + n_subName + '/u_test')
         for n_expression in expression:
             img = os.listdir(main_path + '/' + n_subName + '/u_test/' + n_expression)
 
             for n_img in img:
                 y_test.append(int(n_expression))
-                l_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][0], all_five_parts_optical_flow[n_img][1]])
-                r_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
-                lr_eye_lips = cv2.vconcat([l_eye_lips, r_eye_lips])
+                # l_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][0], all_five_parts_optical_flow[n_img][1]])
+                # r_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
+                # lr_eye_lips = cv2.vconcat([l_eye_lips, r_eye_lips])
+                l_eye_lips = cv2.vconcat([all_five_parts_optical_flow[n_img][0], all_five_parts_optical_flow[n_img][1]])
+                r_eye_lips = cv2.vconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
+                lr_eye_lips = cv2.hconcat([l_eye_lips, r_eye_lips])
                 four_parts_test.append(lr_eye_lips)
-        weight_path = 'ourmodel_threedatasets_weights' + '/' + n_subName + '.pth'
 
-        # Reset or load model weigts
+        # 模型读取
         model = HTNet(
             image_size=28,
             patch_size=7,
@@ -280,14 +236,13 @@ def main(config):
             # the number of transformer blocks at each heirarchy, starting from the bottom(2,2,20) -
             num_classes=3
         )
-
         model = model.to(device)
 
-        if(config.train):
-            # model.apply(reset_weights)
-            print('train')
-        else:
+        weight_path = path_name + '/' + n_subName + '.pth'
+        # Test时读取参数
+        if not (config.train):
             model.load_state_dict(torch.load(weight_path))
+
         optimizer = torch.optim.Adam(model.parameters(),lr=learning_rate)
         y_train = torch.Tensor(y_train).to(dtype=torch.long)
         four_parts_train =  torch.Tensor(np.array(four_parts_train)).permute(0, 3, 1, 2)
@@ -382,20 +337,7 @@ def main(config):
                 avg_epoch_time = sum(epoch_times) / len(epoch_times)
                 
                 # 计算预计完成时间
-                current_time = time.time()
-                elapsed_time = current_time - current_subject_start
-                total_elapsed = current_time - t
-                
-                # 当前受试者预计完成时间
-                remaining_epochs = epochs - epoch
-                eta_subject_seconds = remaining_epochs * avg_epoch_time
-                eta_subject = (datetime.now() + timedelta(seconds=eta_subject_seconds)).strftime("%H:%M:%S")
-                
-                # 总体预计完成时间
-                total_completed_epochs = (subject_idx * epochs) + epoch
-                total_remaining_epochs = (total_subjects * epochs) - total_completed_epochs
-                eta_total_seconds = total_remaining_epochs * avg_epoch_time
-                eta_total = (datetime.now() + timedelta(seconds=eta_total_seconds)).strftime("%H:%M:%S")
+                current_time = time.time()              
                 
                 # 更新进度条
                 progress.update(subject_task, completed=epoch)
@@ -405,11 +347,11 @@ def main(config):
                 if current_time - last_update_time >= update_interval or epoch == epochs:
                     progress.update(
                         subject_task, 
-                        description=f"[green]受试者 {n_subName} | Epoch {epoch}/{epochs} | 训练准确率: {train_acc:.4f} | 验证准确率: {val_acc:.4f} | 平均每Epoch: {avg_epoch_time:.2f}s | ETA: {eta_subject}"
+                        description=f"[green]受试者 {n_subName} | Epoch {epoch}/{epochs} | 平均每Epoch: {avg_epoch_time:.2f}"
                     )
                     progress.update(
                         total_task,
-                        description=f"[cyan]总体进度 ({subject_idx + 1}/{total_subjects}) | 平均每Epoch: {avg_epoch_time:.2f}s | 总ETA: {eta_total}"
+                        description=f"[cyan]总体进度 ({subject_idx + 1}/{total_subjects}) | 平均每Epoch: {avg_epoch_time:.2f}s"
                     )
                     last_update_time = current_time
                 
@@ -421,8 +363,11 @@ def main(config):
                     best_each_subject_pred = temp_best_each_subject_pred
                     # Save Weights
                     if (config.train):
-                        torch.save(model.state_dict(), weight_path)
+                        # torch.save(model.state_dict(), weight_path)
+                        best_weights = copy.deepcopy(model.state_dict())
+                        
 
+        torch.save(best_weights, weight_path)
         # For UF1 and UAR computation
         print('Best Predicted    :', best_each_subject_pred)
         accuracydict = {}
