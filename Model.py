@@ -138,6 +138,8 @@ class Transformer(nn.Module):
             x = ff(x) + x
         return x
 
+
+# HTNet的作用: 接收参数，遍历3个层级，调用对应的函数创建任务
 class HTNet(nn.Module):
     # image_size=28, patch_size=7, dim=256, heads=3, num_hierarchies=3, block_repeats=(2, 2, 10) num_classes=3
     # channels指的是图像的输入通道数,RGB图像为3通道

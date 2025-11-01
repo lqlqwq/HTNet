@@ -187,7 +187,14 @@ def main(config):
     for subject_idx, n_subName in enumerate(subName):
         print('Subject:%s(%s)' % (n_subName, 'Train' if config.train else 'Test'))
 
-        # 数据初始化
+        # 输出路径初始化
+        weight_path = path_name + '/' + n_subName + '.pth'
+
+        # 输出准确率/预测值初始化
+        best_accuracy_for_each_subject = 0
+        best_each_subject_pred = []
+
+        # 图片信息数据初始化
         y_train = []
         y_test = []
         four_parts_train = []
@@ -229,7 +236,7 @@ def main(config):
         model = HTNet(
             image_size=28,
             patch_size=7,
-            dim=256,  # 256,--96, 56-, 192
+            dim=256,  # 256,--96, 56-, 192  feature dimension
             heads=3,  # 3 ---- , 6-
             num_hierarchies=3,  # 3----number of hierarchies
             block_repeats=(2, 2, 10),#(2, 2, 8),------
@@ -238,12 +245,15 @@ def main(config):
         )
         model = model.to(device)
 
-        weight_path = path_name + '/' + n_subName + '.pth'
         # Test时读取参数
         if not (config.train):
             model.load_state_dict(torch.load(weight_path))
 
+        # 指定优化器
         optimizer = torch.optim.Adam(model.parameters(),lr=learning_rate)
+
+        # np.array[图片数组] 把所有的图片打包成一个大包, torch.Tensor将其转化为张量, permute(0, 3, 1, 2)将其从(N, H, W, C)重新排序为(N, C, H, W)
+        # 然后由DataLoader根据Batch Size自动分成小包使用
         y_train = torch.Tensor(y_train).to(dtype=torch.long)
         four_parts_train =  torch.Tensor(np.array(four_parts_train)).permute(0, 3, 1, 2)
         dataset_train = TensorDataset(four_parts_train, y_train)
@@ -252,9 +262,6 @@ def main(config):
         four_parts_test = torch.Tensor(np.array(four_parts_test)).permute(0, 3, 1, 2)
         dataset_test = TensorDataset(four_parts_test, y_test)
         test_dl = DataLoader(dataset_test, batch_size=batch_size)
-        # store best results
-        best_accuracy_for_each_subject = 0
-        best_each_subject_pred = []
 
         # 创建进度条和实时显示
         with Progress(
@@ -266,61 +273,81 @@ def main(config):
             TimeRemainingColumn(),
             console=console,
             refresh_per_second=1
-        ) as progress:
-            
-            # 添加总体进度任务
+        ) as progress:           
+            # 计时 添加总体进度任务
             total_task = progress.add_task(
                 f"[cyan]总体进度 ({subject_idx + 1}/{total_subjects})", 
                 total=total_subjects * epochs
-            )
-            
-            # 添加当前受试者进度任务
+            )            
+            # 计时 添加当前受试者进度任务
             subject_task = progress.add_task(
                 f"[green]受试者 {n_subName}", 
                 total=epochs
-            )
-            
-            # 定时更新变量
+            )            
+            # 计时 定时更新变量
             last_update_time = time.time()
-            update_interval = 30  # 30秒更新一次
+            update_interval = 10  # 30秒更新一次
             epoch_times = []  # 存储每个epoch的时间
             
+            # Epoch内循环
             for epoch in range(1, epochs + 1):
+
+                # 计时 统计开始时间
                 epoch_start_time = time.time()
                 
+                # 训练逻辑
                 if (config.train):
-                    # Training
                     model.train()
+
+                    # 参数初始化 训练损失/准确率/样本数
                     train_loss = 0.0
                     num_train_correct = 0
                     num_train_examples = 0
 
                     for batch_idx, batch in enumerate(train_dl):
+                        # 清零梯度
                         optimizer.zero_grad()
+
+                        # 获取训练数据, batch[0]是图像数据 batch[1]是对应标签
                         x = batch[0].to(device)
                         y = batch[1].to(device)
+
+                        # 前向传播
                         yhat = model(x)
+                        # 计算损失
                         loss = loss_fn(yhat, y)
+                        # 反向传播
                         loss.backward()
+                        # 更新参数
                         optimizer.step()
 
+                        # 统计训练损失, 把loss从张量转换为py数值, 得出批次内实际损失   loss是一个0维张量所以需要.item()
                         train_loss += loss.data.item() * x.size(0)
+                        # 取每张图片的预测概率最高的那个值，然后验证是否正确
+                        # torch.max(yhat, 1) 1代表的是在张量的第1维取最大值, 如果是0就是跨batch取, 因为这里的形状是 [B,C]
                         num_train_correct += (torch.max(yhat, 1)[1] == y).sum().item()
                         num_train_examples += x.shape[0]
 
                     train_acc = num_train_correct / num_train_examples
                     train_loss = train_loss / len(train_dl.dataset)
 
-                # Testing
+                # 共通处理
+                # 切换到验证模式, 结束训练
                 model.eval()
+
+                # 数据初始化
                 val_loss = 0.0
                 num_val_correct = 0
                 num_val_examples = 0
+
+                #验证 逻辑同上
                 for batch in test_dl:
                     x = batch[0].to(device)
                     y = batch[1].to(device)
                     yhat = model(x)
                     loss = loss_fn(yhat, y)
+
+                    # 数据统计
                     val_loss += loss.data.item() * x.size(0)
                     num_val_correct += (torch.max(yhat, 1)[1] == y).sum().item()
                     num_val_examples += y.shape[0]
@@ -328,21 +355,18 @@ def main(config):
                 val_acc = num_val_correct / num_val_examples
                 val_loss = val_loss / len(test_dl.dataset)
                 
+                # 进度条/时间 统计
                 # 记录当前epoch时间
                 epoch_end_time = time.time()
                 current_epoch_time = epoch_end_time - epoch_start_time
-                epoch_times.append(current_epoch_time)
-                
+                epoch_times.append(current_epoch_time)               
                 # 计算平均每epoch时间
-                avg_epoch_time = sum(epoch_times) / len(epoch_times)
-                
+                avg_epoch_time = sum(epoch_times) / len(epoch_times)               
                 # 计算预计完成时间
-                current_time = time.time()              
-                
+                current_time = time.time()                             
                 # 更新进度条
                 progress.update(subject_task, completed=epoch)
-                progress.update(total_task, completed=(subject_idx * epochs) + epoch)
-                
+                progress.update(total_task, completed=(subject_idx * epochs) + epoch)             
                 # 每30秒或每个epoch结束时更新描述信息
                 if current_time - last_update_time >= update_interval or epoch == epochs:
                     progress.update(
@@ -354,21 +378,24 @@ def main(config):
                         description=f"[cyan]总体进度 ({subject_idx + 1}/{total_subjects}) | 平均每Epoch: {avg_epoch_time:.2f}s"
                     )
                     last_update_time = current_time
-                
-                #### best result
-                temp_best_each_subject_pred = []
-                if best_accuracy_for_each_subject <= val_acc:
+
+                # 准确度提升时保存模型
+                if best_accuracy_for_each_subject <= val_acc:                
+                    temp_best_each_subject_pred = []
                     best_accuracy_for_each_subject = val_acc
+                    # 获取预测结果，转换为py列表  extend把数组展开再逐个添加至新数组, 避免把整个数组直接添加进去
                     temp_best_each_subject_pred.extend(torch.max(yhat, 1)[1].tolist())
                     best_each_subject_pred = temp_best_each_subject_pred
                     # Save Weights
                     if (config.train):
                         # torch.save(model.state_dict(), weight_path)
+                        # 临时保存到内存, 最后统一保存
                         best_weights = copy.deepcopy(model.state_dict())
                         
 
         torch.save(best_weights, weight_path)
-        # For UF1 and UAR computation
+
+        # Sub内循环 输出结果 并统计进总结果
         print('Best Predicted    :', best_each_subject_pred)
         accuracydict = {}
         accuracydict['pred'] = best_each_subject_pred
@@ -384,6 +411,7 @@ def main(config):
         best_UF1, best_UAR = recognition_evaluation(total_gt, best_total_pred, show=True)
         print('best UF1:', round(best_UF1, 4), '| best UAR:', round(best_UAR, 4))
 
+    # 输出总结果
     print('Final Evaluation: ')
     UF1, UAR = recognition_evaluation(total_gt, total_pred)
     print(np.shape(total_gt))
@@ -394,8 +422,9 @@ def main(config):
 if __name__ == '__main__':
     # get_whole_u_v_os()
     # create_norm_u_v_os_train_test()
+
+    # 创建一个参数接收器
     parser = argparse.ArgumentParser()
-    # input parameters
-    parser.add_argument('--train', type=strtobool, default=False)  # Train or use pre-trained weight for prediction
+    parser.add_argument('--train', type=strtobool, default=False)
     config = parser.parse_args()
     main(config)
